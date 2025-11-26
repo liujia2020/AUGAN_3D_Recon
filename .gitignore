@@ -17,3 +17,6 @@ __pycache__/
 tests/output_check/
 tests/output_check_v3/
 tests/output_physics/
+tests/
+checkpoints/
+project_assets/

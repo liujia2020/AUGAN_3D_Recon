@@ -107,16 +107,17 @@ class UltrasoundDataset(BaseDataset):
                 lq_patch = self.normalize(lq_patch)
                 hq_patch = self.normalize(hq_patch)
 
-                # 5. [关键] 各向异性物理增强
-                seed = np.random.randint(0, 2**32 - 1)
-                
-                # 使用计算好的 anisotropic_sigma
-                deformer_lq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
-                deformer_hq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
-                
-                lq_patch = deformer_lq(lq_patch)
-                hq_patch = deformer_hq(hq_patch)
-
+                # 5. [关键] 各向异性物理增强 (仅当未指定 --no_elastic 时执行)
+                if not self.opt.no_elastic:  # [新增判断]
+                    seed = np.random.randint(0, 2**32 - 1)
+                    
+                    # 使用计算好的 anisotropic_sigma
+                    deformer_lq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
+                    deformer_hq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
+                    
+                    lq_patch = deformer_lq(lq_patch)
+                    hq_patch = deformer_hq(hq_patch)
+                    
                 # 6. 翻转
                 if not self.opt.no_flip:
                     if random.random() > 0.5:
