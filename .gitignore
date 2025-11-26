@@ -1,0 +1,19 @@
+# 忽略所有 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略所有数据文件
+*.nii
+*.nii.gz
+*.h5
+*.mat
+
+# 忽略所有图片
+*.png
+*.jpg
+*.jpeg
+
+# 忽略测试输出文件夹
+tests/output_check/
+tests/output_check_v3/
+tests/output_physics/
