@@ -1,6 +1,6 @@
 """
-AUGAN 3D 训练主入口脚本 (V8.1 - 修复梯度报错版)
-修复了 save_nii 时因未 detach 导致的 RuntimeError。
+AUGAN 3D 训练主入口脚本 (V9.0 - 信息补全最终版)
+修复了 Patch Size 信息丢失的问题，保持所有物理增强功能。
 """
 import time
 import os
@@ -37,8 +37,9 @@ def get_pixel_stats(tensor):
     }
 
 def print_training_summary(opt, dataset, model):
-    """打印详细的训练配置摘要"""
+    """打印详细的训练配置摘要 (已补全 Patch Size)"""
     device = torch.device('cuda:{}'.format(opt.gpu_ids[0])) if opt.gpu_ids else torch.device('cpu')
+    # 计算显示比例
     visual_aspect = opt.spacing_z / opt.spacing_x
     
     print("\n" + "="*80)
@@ -48,11 +49,21 @@ def print_training_summary(opt, dataset, model):
     print(f"  - Data Root:     {opt.dataroot}")
     print(f"  - Dataset Size:  {len(dataset)} volumes")
     print(f"  - Batch Size:    {opt.batch_size}")
+    # [修复点] 补回 Patch Size 信息
+    print(f"  - Patch Size:    [D={opt.patch_size_d}, H={opt.patch_size_h}, W={opt.patch_size_w}]")
     print(f"  - Physics:       Z_spacing={opt.spacing_z}mm, X_spacing={opt.spacing_x}mm")
     print(f"  - Visual Aspect: {visual_aspect:.4f} (Image will be vertically compressed)")
     print(f"  - Model:         G={opt.netG}, D={opt.netD}")
     print(f"  - LR Config:     G={opt.lr}, D={opt.lr * opt.lr_d_ratio}")
     print(f"  - L2 Weight:     {opt.lambda_L2}")
+    
+    # 打印增强状态
+    aug_status = []
+    if opt.no_flip: aug_status.append("No Flip")
+    if opt.no_elastic: aug_status.append("No Elastic")
+    if not aug_status: aug_status.append("Full Augmentation On")
+    print(f"  - Augmentation:  {', '.join(aug_status)}")
+    
     print("="*80 + "\n")
 
 def print_epoch_report(epoch, total_epochs, epoch_time, losses_avg, lr_G, lr_D):
@@ -74,18 +85,11 @@ def print_epoch_report(epoch, total_epochs, epoch_time, losses_avg, lr_G, lr_D):
     print('-' * 80 + '\n')
 
 def save_epoch_visuals(model, epoch, save_dir, writer, opt, save_nii=False):
-    """
-    保存可视化结果：
-    1. PNG 图片 (物理比例矫正，横向矩形)
-    2. NIfTI 文件 (带物理头信息)
-    """
+    """保存可视化结果"""
     visual_aspect = opt.spacing_z / opt.spacing_x
     
-    # 1. 提取数据并画图 (使用 no_grad 上下文，自动处理梯度)
     with torch.no_grad():
-        # 取 Batch 第一个样本的 Y 轴中间切片
         w_idx = model.real_lq.shape[4] // 2
-        
         img_lq = model.real_lq[0, 0, :, :, w_idx].cpu().numpy()
         img_fake = model.fake_hq[0, 0, :, :, w_idx].cpu().numpy()
         img_real = model.real_hq[0, 0, :, :, w_idx].cpu().numpy()
@@ -104,7 +108,6 @@ def save_epoch_visuals(model, epoch, save_dir, writer, opt, save_nii=False):
     images = [img_lq, img_fake, img_real]
     
     for ax, img, title in zip(axes, images, titles):
-        # 物理比例矫正
         im = ax.imshow(img, cmap='gray', vmin=-1, vmax=1, aspect=visual_aspect)
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("Lateral (X)")
@@ -120,13 +123,8 @@ def save_epoch_visuals(model, epoch, save_dir, writer, opt, save_nii=False):
     writer.add_figure('Visual/Epoch_Compare', fig, global_step=epoch)
     print(f"  🖼️  Epoch {epoch} Visual Saved: {img_filename}")
 
-    # 2. 保存 NIfTI (独立步骤)
     if save_nii:
-        # [!!] 关键修复: 必须先 .detach() 再 .cpu().numpy()
-        # 还原顺序: (1, 1, D, H, W) -> squeeze -> (D, H, W) -> permute -> (H, W, D)即(X, Y, Z)
         vol_fake = model.fake_hq[0, 0].detach().cpu().numpy().transpose(1, 2, 0)
-        
-        # 写入物理间距
         affine = np.diag([opt.spacing_x, opt.spacing_x, opt.spacing_z, 1.0])
         nii_fake = nib.Nifti1Image(vol_fake, affine)
         
@@ -140,12 +138,10 @@ def save_epoch_visuals(model, epoch, save_dir, writer, opt, save_nii=False):
 # ==============================================================================
 
 if __name__ == '__main__':
-    # 1. 解析参数
     opt_driver = TrainOptions() 
     opt = opt_driver.parse()    
     set_seed(42)
     
-    # 2. 准备目录
     log_dir = os.path.join(opt.checkpoints_dir, opt.name, 'logs')
     img_save_dir = os.path.join(opt.checkpoints_dir, opt.name, 'web_images')
     os.makedirs(log_dir, exist_ok=True)
@@ -153,25 +149,23 @@ if __name__ == '__main__':
     
     writer = SummaryWriter(log_dir=log_dir)
 
-    # 3. 加载数据与模型
     dataset = create_dataset(opt)
     model = create_model(opt)
     model.setup(opt)
     
     print("----------------------------------------------------------------")
     opt_driver.print_options(opt) 
+    
+    # 打印摘要 (包含 Patch Size)
     print_training_summary(opt, dataset, model)
     
-    # 4. 训练循环
     total_iters = 0                
     total_epochs = opt.n_epochs + opt.n_epochs_decay
     
-    # 强制初始采样 (Step 0)
     print("📸 Saving initial sample (Step 0 check)...")
     init_batch = next(iter(dataset))
     model.set_input(init_batch)
-    model.forward() 
-    # 这里的 save_nii=True 会触发刚才修复的代码
+    model.forward()
     save_epoch_visuals(model, 0, img_save_dir, writer, opt, save_nii=True)
     
     for epoch in range(opt.epoch_count, total_epochs + 1):
@@ -198,7 +192,6 @@ if __name__ == '__main__':
                 for k, v in current_losses.items():
                     writer.add_scalar(f'Loss_Step/{k}', v, total_iters)
 
-        # --- Epoch End ---
         avg_losses = {k: v / epoch_iter_count for k, v in epoch_losses.items()}
         for k, v in avg_losses.items():
             writer.add_scalar(f'Loss_Epoch/{k}', v, epoch)
@@ -207,7 +200,6 @@ if __name__ == '__main__':
         lr_D = model.optimizers[1].param_groups[0]['lr']
         print_epoch_report(epoch, total_epochs, time.time() - epoch_start_time, avg_losses, lr_G, lr_D)
         
-        # 每个 Epoch 必保存图和 NIfTI
         save_epoch_visuals(model, epoch, img_save_dir, writer, opt, save_nii=True)
         
         if epoch % opt.save_epoch_freq == 0:

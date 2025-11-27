@@ -7,15 +7,16 @@ import logging
 from data.base_dataset import BaseDataset
 from data.transforms import ElasticDeformation, RandomContrast
 
-# --- [新增] 物理参数常量 ---
-# 基于 Matlab 代码分析确认的数值
-SPACING_Z = 0.0362  # mm (深度方向)
-SPACING_X = 0.2     # mm (侧向)
-SPACING_Y = 0.2     # mm (仰角)
+# --- 物理参数常量 ---
+SPACING_Z = 0.0362
+SPACING_X = 0.2
+SPACING_Y = 0.2
 
 class UltrasoundDataset(BaseDataset):
     """
-    专门用于加载 3D 超声数据的数据集 (支持各向异性物理增强)。
+    [性能优化版] UltrasoundDataset
+    核心改进：实现 Lazy Loading (懒加载)，仅读取需要的 Patch，而非整个 Volume。
+    解决内存溢出导致的 IO 瓶颈。
     """
 
     def __init__(self, opt):
@@ -27,31 +28,20 @@ class UltrasoundDataset(BaseDataset):
         self.lq_paths = sorted(self.make_dataset(self.dir_lq))
         self.hq_paths = sorted(self.make_dataset(self.dir_hq))
         
-        if len(self.lq_paths) != len(self.hq_paths):
-            logging.warning(f"数据数量不匹配! LQ: {len(self.lq_paths)}, HQ: {len(self.hq_paths)}")
-            
         self.size = len(self.lq_paths)
         
-        self.patch_d = opt.patch_size_d  # Z轴 (256)
-        self.patch_h = opt.patch_size_h  # X轴 (64)
-        self.patch_w = opt.patch_size_w  # Y轴 (64)
+        # 目标 Patch 大小 (对应 Tensor 的 D, H, W)
+        self.patch_d = opt.patch_size_d  # 256 (Z)
+        self.patch_h = opt.patch_size_h  # 64 (X)
+        self.patch_w = opt.patch_size_w  # 64 (Y)
         
-        # --- [新增] 计算各向异性 Sigma ---
-        # 目标：在所有方向上保持约 10mm 的物理平滑度
-        # 基准：Lateral (X) 轴 Sigma = 50 像素 -> 对应 50 * 0.2 = 10mm
+        # 预计算各向异性 Sigma
         base_sigma = 50.0
-        
-        # Z 轴需要的 Sigma = 10mm / 0.0362mm ≈ 276 像素
         sigma_z = base_sigma * (SPACING_X / SPACING_Z)
-        sigma_x = base_sigma
-        sigma_y = base_sigma
+        self.anisotropic_sigma = (sigma_z, base_sigma, base_sigma)
         
-        # 最终的各向异性 Sigma 元组 (Z, X, Y)
-        self.anisotropic_sigma = (sigma_z, sigma_x, sigma_y)
-        
-        logging.info(f"[{opt.phase.upper()}] Dataset initialized. Found {self.size} pairs.")
-        logging.info(f"Physics Spacing: Z={SPACING_Z:.4f}, X={SPACING_X:.2f}")
-        logging.info(f"Anisotropic Sigma calculated: {self.anisotropic_sigma} (Z-smoothing boosted by {SPACING_X/SPACING_Z:.2f}x)")
+        logging.info(f"[{opt.phase.upper()}] Dataset initialized. Size: {self.size}")
+        logging.info(f"Optimization: Lazy Loading enabled (Reading patches only).")
 
     def make_dataset(self, dir_path):
         images = []
@@ -77,64 +67,83 @@ class UltrasoundDataset(BaseDataset):
         hq_path = self.hq_paths[index] 
 
         try:
-            # 1. 读取 NIfTI (X, Y, Z)
+            # 1. 打开文件 (只读取 Header，不读取数据)
             lq_obj = nib.load(lq_path)
             hq_obj = nib.load(hq_path)
             
-            lq_vol = lq_obj.get_fdata().astype(np.float32)
-            hq_vol = hq_obj.get_fdata().astype(np.float32)
+            # 获取原始形状 (X, Y, Z) = (128, 128, 1024)
+            # 注意：nibabel 的 shape 属性是从 header 读的，非常快
+            src_shape = lq_obj.shape 
+            src_x, src_y, src_z = src_shape
 
-            # 2. 维度转置 -> (Z, X, Y)
-            lq_vol = lq_vol.transpose(2, 0, 1)
-            hq_vol = hq_vol.transpose(2, 0, 1)
+            # 目标 Patch 在原始文件中的尺寸
+            # 我们最终需要 (D, H, W) -> (256, 64, 64)
+            # 对应原始文件的 (Z, X, Y)
+            req_z = self.patch_d # 256
+            req_x = self.patch_h # 64
+            req_y = self.patch_w # 64
 
-            D, H, W = lq_vol.shape
-
-            # --- 训练模式 ---
+            # --- 训练模式：在硬盘上直接切片 (On-disk Slicing) ---
             if self.opt.isTrain:
-                if D < self.patch_d or H < self.patch_h or W < self.patch_w:
-                    return self.__getitem__(random.randint(0, self.size - 1))
+                # 2. 计算随机裁剪坐标
+                # 确保不越界
+                if src_z < req_z or src_x < req_x or src_y < req_y:
+                     return self.__getitem__(random.randint(0, self.size - 1))
 
-                # 3. 随机裁剪
-                d_s = random.randint(0, D - self.patch_d)
-                h_s = random.randint(0, H - self.patch_h)
-                w_s = random.randint(0, W - self.patch_w)
+                start_x = random.randint(0, src_x - req_x)
+                start_y = random.randint(0, src_y - req_y)
+                start_z = random.randint(0, src_z - req_z)
 
-                lq_patch = lq_vol[d_s:d_s+self.patch_d, h_s:h_s+self.patch_h, w_s:w_s+self.patch_w]
-                hq_patch = hq_vol[d_s:d_s+self.patch_d, h_s:h_s+self.patch_h, w_s:w_s+self.patch_w]
+                # 3. [关键优化] 只读取 Patch 数据
+                # 使用 dataobj 进行切片，nibabel 会智能地只读取这一块
+                # 注意顺序：文件是 (X, Y, Z)
+                lq_patch = lq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
+                hq_patch = hq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
+                
+                # 4. 转为 Numpy 并修正数据类型
+                lq_patch = np.array(lq_patch, dtype=np.float32)
+                hq_patch = np.array(hq_patch, dtype=np.float32)
 
-                # 4. 归一化
+                # 5. 维度转置 (X, Y, Z) -> (Z, X, Y)
+                # (64, 64, 256) -> (256, 64, 64)
+                lq_patch = lq_patch.transpose(2, 0, 1)
+                hq_patch = hq_patch.transpose(2, 0, 1)
+
+                # 6. 归一化
                 lq_patch = self.normalize(lq_patch)
                 hq_patch = self.normalize(hq_patch)
 
-                # 5. [关键] 各向异性物理增强 (仅当未指定 --no_elastic 时执行)
-                if not self.opt.no_elastic:  # [新增判断]
+                # 7. 数据增强 (弹性形变等)
+                if not self.opt.no_elastic:
                     seed = np.random.randint(0, 2**32 - 1)
-                    
-                    # 使用计算好的 anisotropic_sigma
                     deformer_lq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
                     deformer_hq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
-                    
                     lq_patch = deformer_lq(lq_patch)
                     hq_patch = deformer_hq(hq_patch)
-                    
-                # 6. 翻转
+
                 if not self.opt.no_flip:
                     if random.random() > 0.5:
                         lq_patch = np.flip(lq_patch, axis=2).copy()
                         hq_patch = np.flip(hq_patch, axis=2).copy()
                 
-                # 7. 强制截断 (Fix Overshoot)
+                # 8. 截断与 Tensor
                 lq_patch = np.clip(lq_patch, -1.0, 1.0)
                 hq_patch = np.clip(hq_patch, -1.0, 1.0)
 
                 lq_tensor = torch.from_numpy(lq_patch).float().unsqueeze(0)
                 hq_tensor = torch.from_numpy(hq_patch).float().unsqueeze(0)
 
-            # --- 测试模式 ---
+            # --- 测试模式：还是读全图 ---
             else:
+                lq_vol = np.array(lq_obj.dataobj).astype(np.float32)
+                hq_vol = np.array(hq_obj.dataobj).astype(np.float32)
+                
+                lq_vol = lq_vol.transpose(2, 0, 1)
+                hq_vol = hq_vol.transpose(2, 0, 1)
+
                 lq_vol = self.normalize(lq_vol)
                 hq_vol = self.normalize(hq_vol)
+
                 lq_tensor = torch.from_numpy(lq_vol).float().unsqueeze(0)
                 hq_tensor = torch.from_numpy(hq_vol).float().unsqueeze(0)
 

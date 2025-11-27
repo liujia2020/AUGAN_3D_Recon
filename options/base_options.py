@@ -1,13 +1,12 @@
 import argparse
 import os
 import torch
-import models  # [!!] 关键修复: 导入 models 模块以加载模型特定参数
+import models  # 必须导入 models 模块
 
 class BaseOptions():
     """
-    基础配置类 [V5.0 - 最终修复版]
-    1. 导入了 models 以解决参数加载错误。
-    2. 加入了物理间距参数，支持物理比例可视化。
+    基础配置类 [V6.0 - 修复参数丢失版]
+    修复了缺失 --epoch 和 --load_iter 导致测试无法运行的 Bug。
     """
 
     def __init__(self):
@@ -36,14 +35,13 @@ class BaseOptions():
         
         # --- 数据增强 ---
         parser.add_argument('--no_flip', action='store_true', help='禁用翻转')
-        parser.add_argument('--no_elastic', action='store_true', help='禁用弹性形变') # [新增] 方便做消融实验
+        parser.add_argument('--no_elastic', action='store_true', help='禁用弹性形变')
         
-        # --- [关键] 3D 物理参数 ---
+        # --- 3D 物理与数据参数 ---
         parser.add_argument('--patch_size_d', type=int, default=256, help='Z轴 Patch 大小')
         parser.add_argument('--patch_size_h', type=int, default=64, help='X轴 Patch 大小')
         parser.add_argument('--patch_size_w', type=int, default=64, help='Y轴 Patch 大小')
         
-        # 默认 Z1024 参数 (Z=0.0362mm)
         parser.add_argument('--spacing_z', type=float, default=0.0362, help='Z轴物理间距 (mm)')
         parser.add_argument('--spacing_x', type=float, default=0.2, help='X轴物理间距 (mm)')
         
@@ -52,6 +50,10 @@ class BaseOptions():
         
         parser.add_argument('--batch_size', type=int, default=2, help='Batch Size')
         parser.add_argument('--num_workers', type=int, default=4, help='线程数')
+        
+        # --- [修复] 补回了模型加载参数 ---
+        parser.add_argument('--epoch', type=str, default='latest', help='加载哪个 epoch? (latest 或 数字)')
+        parser.add_argument('--load_iter', type=int, default='0', help='加载哪个迭代步? (0 表示按 epoch 加载)')
         
         # --- 通用 ---
         parser.add_argument('--suffix', default='', type=str, help='自定义后缀')
@@ -67,7 +69,7 @@ class BaseOptions():
 
         opt, _ = parser.parse_known_args()
         
-        # [关键] 加载模型特定参数 (如 lambda_L2)
+        # 加载模型特定参数
         model_name = opt.model
         model_option_setter = models.get_option_setter(model_name)
         parser = model_option_setter(parser, self.isTrain)
