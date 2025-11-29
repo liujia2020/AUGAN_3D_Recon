@@ -43,6 +43,6 @@ class TrainOptions(BaseOptions):
         # lsgan = 最小二乘 GAN (MSE)，通常训练更稳定
         # wgangp = Wasserstein GAN + 梯度惩罚，理论上最稳定但慢
         parser.add_argument('--gan_mode', type=str, default='vanilla', help='GAN 损失类型 [vanilla | lsgan | wgangp]')
-
+        parser.add_argument('--pixel_loss', type=str, default='L1', choices=['L1', 'L2'], help='像素级损失函数的类型: L1 (MAE) 或 L2 (MSE)')
         self.isTrain = True
         return parser

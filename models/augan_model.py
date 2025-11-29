@@ -24,7 +24,8 @@ class AuganModel(BaseModel):
         
         if is_train:
             # 像素级损失权重 (L2 Loss Weight)
-            parser.add_argument('--lambda_L2', type=float, default=100.0, help='L2 (MSE) 像素损失的权重')
+            # parser.add_argument('--lambda_L2', type=float, default=100.0, help='L2 (MSE) 像素损失的权重')
+            parser.add_argument('--lambda_pixel', type=float, default=100.0, help='像素级内容损失的权重')
         return parser
 
     def __init__(self, opt):
@@ -33,7 +34,8 @@ class AuganModel(BaseModel):
         
         # 指定需要保存/打印的损失名称
         # G_GAN: 生成器对抗损失, G_L2: 像素误差, D_Real/Fake: 判别器损失
-        self.loss_names = ['G_GAN', 'G_L2', 'D_Real', 'D_Fake']
+        # self.loss_names = ['G_GAN', 'G_L2', 'D_Real', 'D_Fake']
+        self.loss_names = ['G_GAN', 'G_Pixel', 'D_Real', 'D_Fake']
         
         # 指定可视化图片的名称 (用于 tensorboard 或 网页显示)
         self.visual_names = ['real_lq', 'fake_hq', 'real_hq']
@@ -70,7 +72,12 @@ class AuganModel(BaseModel):
             # 对抗损失 (GAN Loss)
             self.criterionGAN = GANLoss(opt.gan_mode).to(self.device)
             # 像素损失 (L2 / MSE) - 用于恢复结构和纹理
-            self.criterionL2 = torch.nn.MSELoss()
+            if opt.pixel_loss == 'L1':
+                self.criterionPixel = torch.nn.L1Loss()
+            elif opt.pixel_loss == 'L2':
+                self.criterionPixel = torch.nn.MSELoss()
+            else:
+                raise NotImplementedError(f"Pixel loss {opt.pixel_loss} not recognized.")
             
             # 优化器
             self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -121,10 +128,12 @@ class AuganModel(BaseModel):
         
         # 2. Pixel Loss: Fake_HQ 应该无限接近 Real_HQ
         # lambda_L2 控制这一项的权重 (例如 100.0)
-        self.loss_G_L2 = self.criterionL2(self.fake_hq, self.real_hq) * self.opt.lambda_L2
+        # self.loss_G_L2 = self.criterionL2(self.fake_hq, self.real_hq) * self.opt.lambda_L2
+        self.loss_G_Pixel = self.criterionPixel(self.fake_hq, self.real_hq) * self.opt.lambda_pixel
         
         # 3. Combine
-        self.loss_G = self.loss_G_GAN + self.loss_G_L2
+        # self.loss_G = self.loss_G_GAN + self.loss_G_L2
+        self.loss_G = self.loss_G_GAN + self.loss_G_Pixel
         self.loss_G.backward()
 
     def optimize_parameters(self):

@@ -55,7 +55,8 @@ def print_training_summary(opt, dataset, model):
     print(f"  - Visual Aspect: {visual_aspect:.4f} (Image will be vertically compressed)")
     print(f"  - Model:         G={opt.netG}, D={opt.netD}")
     print(f"  - LR Config:     G={opt.lr}, D={opt.lr * opt.lr_d_ratio}")
-    print(f"  - L2 Weight:     {opt.lambda_L2}")
+    # print(f"  - L2 Weight:     {opt.lambda_L2}")
+    print(f"  - Pixel Loss:    {opt.pixel_loss} (Weight: {opt.lambda_pixel})")
     
     # 打印增强状态
     aug_status = []
@@ -72,13 +73,15 @@ def print_epoch_report(epoch, total_epochs, epoch_time, losses_avg, lr_G, lr_D):
     print(f'END OF EPOCH {epoch} / {total_epochs} \t Time Taken: {epoch_time:.0f} sec')
     print(f'  Learning Rates: \t G_lr = {lr_G:.7f} | D_lr = {lr_D:.7f}')
     
-    loss_G_total = losses_avg.get('G_GAN', 0) + losses_avg.get('G_L2', 0)
+    # loss_G_total = losses_avg.get('G_GAN', 0) + losses_avg.get('G_L2', 0)
+    loss_G_total = losses_avg.get('G_GAN', 0) + losses_avg.get('G_Pixel', 0)
     loss_D_total = (losses_avg.get('D_Real', 0) + losses_avg.get('D_Fake', 0)) * 0.5
     
     print('  Average Losses:')
     print(f'    Generator (G): \t Total ≈ {loss_G_total:.4f}')
     print(f'      ├─ G_Adversarial: \t {losses_avg.get("G_GAN", 0):.4f}')
-    print(f'      └─ G_Pixelwise (L2): \t {losses_avg.get("G_L2", 0):.4f}')
+    # print(f'      └─ G_Pixelwise (L2): \t {losses_avg.get("G_L2", 0):.4f}')
+    print(f'      └─ G_Pixelwise: \t {losses_avg.get("G_Pixel", 0):.4f}')
     print(f'    Discriminator (D): \t Total ≈ {loss_D_total:.4f}')
     print(f'      ├─ D_Real_Loss: \t {losses_avg.get("D_Real", 0):.4f}')
     print(f'      └─ D_Fake_Loss: \t {losses_avg.get("D_Fake", 0):.4f}')
@@ -187,11 +190,20 @@ if __name__ == '__main__':
             for k in epoch_losses.keys():
                 epoch_losses[k] += current_losses.get(k, 0.0)
 
+            # if total_iters % opt.print_freq == 0:    
+            #     progress_bar.set_postfix(G_L2=f"{current_losses['G_L2']:.3f}")
+            #     for k, v in current_losses.items():
+            #         writer.add_scalar(f'Loss_Step/{k}', v, total_iters)
+            
             if total_iters % opt.print_freq == 0:    
-                progress_bar.set_postfix(G_L2=f"{current_losses['G_L2']:.3f}")
+                # [修改] 统一寻找 G_Pixel
+                if 'G_Pixel' in current_losses:
+                    # 在进度条里显示当前的 Loss 类型和数值
+                    progress_bar.set_postfix(pixel_loss=f"{current_losses['G_Pixel']:.3f}")
+                
                 for k, v in current_losses.items():
                     writer.add_scalar(f'Loss_Step/{k}', v, total_iters)
-
+                    
         avg_losses = {k: v / epoch_iter_count for k, v in epoch_losses.items()}
         for k, v in avg_losses.items():
             writer.add_scalar(f'Loss_Epoch/{k}', v, epoch)
