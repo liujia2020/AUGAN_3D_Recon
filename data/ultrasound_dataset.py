@@ -5,75 +5,112 @@ import nibabel as nib
 import random
 import logging
 from data.base_dataset import BaseDataset
-from data.transforms import ElasticDeformation, RandomContrast
-
-# --- 物理参数常量 ---
-SPACING_Z = 0.0362
-SPACING_X = 0.2
-SPACING_Y = 0.2
+# [修复1] 移除不存在的 get_transform，只保留 get_3d_transform
+from data.transforms import  ElasticDeformation
 
 class UltrasoundDataset(BaseDataset):
     """
-    [V9.0 - 拒绝无效训练版]
-    核心特性：
-    1. Lazy Loading: 仅读取 Patch，内存零负担。
-    2. Active Sampling: 拒绝纯黑背景 Patch，强制模型学习弱信号。
-    3. Physics Aware: 各向异性增强。
+    [V10.0 - 最终融合版]
+    集大成者：
+    1. 递归扫描 (Recursive Walk) - 解决文件夹分层
+    2. 权重采样 (Weighted Sampling) - 解决数据不平衡
+    3. 懒加载 (Lazy Loading) - 解决内存爆炸 (关键!)
+    4. 主动采样 (Active Sampling) - 解决空 Patch 问题
     """
 
     def __init__(self, opt):
         BaseDataset.__init__(self, opt)
+        self.phase_folder = opt.phase + '_lq' # e.g., 'train_lq'
         
-        self.dir_lq = os.path.join(opt.dataroot, opt.phase + '_lq')
-        self.dir_hq = os.path.join(opt.dataroot, opt.phase + '_hq')
-        
-        self.lq_paths = sorted(self.make_dataset(self.dir_lq))
-        self.hq_paths = sorted(self.make_dataset(self.dir_hq))
+        # [功能1] 递归扫描所有子目录
+        self.lq_paths, self.hq_paths = self._walk_and_find_images(opt.dataroot, self.phase_folder)
         
         self.size = len(self.lq_paths)
-        
-        # Patch 大小
+        if self.size == 0:
+            raise RuntimeError(f"Found 0 images in {opt.dataroot} recursively searching for {self.phase_folder}")
+
+        logging.info(f"[{opt.phase.upper()}] Dataset initialized. Size: {self.size}")
+
+        # Patch 参数
         self.patch_d = opt.patch_size_d 
         self.patch_h = opt.patch_size_h 
         self.patch_w = opt.patch_size_w 
         
-        # 各向异性 Sigma
-        base_sigma = 50.0
-        sigma_z = base_sigma * (SPACING_X / SPACING_Z)
-        self.anisotropic_sigma = (sigma_z, base_sigma, base_sigma)
+        # 物理参数
+        self.spacing_z = getattr(opt, 'spacing_z', 0.0362)
+        self.spacing_x = getattr(opt, 'spacing_x', 0.2)
         
-        # [关键参数] 有效信号阈值
-        # 归一化后的数据范围是 [-1, 1]。
-        # -0.95 意味着只要 Patch 里有一点点信号 (>-54dB)，就不算空。
-        self.signal_threshold = -0.95 
-        
-        logging.info(f"[{opt.phase.upper()}] Dataset initialized. Size: {self.size}")
-        if opt.isTrain:
-            logging.info(f"Strategy: Active Sampling Enabled (Threshold > {self.signal_threshold})")
+        # [参数] 信号阈值 (用于主动采样)
+        self.signal_threshold = -0.95
 
-    def make_dataset(self, dir_path):
-        images = []
-        if not os.path.isdir(dir_path):
-            logging.error(f"Directory not found: {dir_path}")
-            return images
-        for root, _, fnames in sorted(os.walk(dir_path)):
-            for fname in fnames:
-                if fname.endswith('.nii') or fname.endswith('.nii.gz'):
-                    images.append(os.path.join(root, fname))
-        return images
+        # 预计算各向异性增强参数
+        base_sigma = 50.0
+        sigma_z = base_sigma * (self.spacing_x / self.spacing_z)
+        self.anisotropic_sigma = (sigma_z, base_sigma, base_sigma)
+
+    def _walk_and_find_images(self, root_dir, target_folder_name):
+        """递归遍历寻找匹配的文件夹"""
+        lq_paths = []
+        hq_paths = []
+        IMG_EXTENSIONS = ['.nii', '.nii.gz']
+
+        for root, dirs, files in os.walk(root_dir):
+            folder_name = os.path.basename(root)
+            # 只要文件夹名字对上了 (train_lq)
+            if folder_name == target_folder_name:
+                for fname in files:
+                    if any(fname.endswith(ext) for ext in IMG_EXTENSIONS):
+                        lq_p = os.path.join(root, fname)
+                        # 假设命名规则严格对应: .../train_lq/... -> .../train_hq/...
+                        hq_p = lq_p.replace('_lq', '_hq')
+                        
+                        if os.path.exists(hq_p):
+                            lq_paths.append(lq_p)
+                            hq_paths.append(hq_p)
+        
+        return sorted(lq_paths), sorted(hq_paths)
+
+    def get_sample_weights(self):
+        """[功能2] 计算采样权重 (组织 vs 点靶)"""
+        # 关键词列表 (转为小写匹配)
+        keywords = ['muscle', 'carotid', 'phantom', '肌肉', '颈动脉', '仿体']
+        
+        is_tissue_list = []
+        count_tissue = 0
+        count_point = 0
+        
+        for path in self.lq_paths:
+            path_lower = path.lower()
+            if any(k in path_lower for k in keywords):
+                is_tissue_list.append(True)
+                count_tissue += 1
+            else:
+                is_tissue_list.append(False)
+                count_point += 1
+        
+        total = len(self.lq_paths)
+        if count_tissue == 0: count_tissue = 1
+        if count_point == 0: count_point = 1
+        
+        w_tissue = total / count_tissue
+        w_point = total / count_point
+        
+        logging.info(f"⚖️ Balancing Weights: Tissue={w_tissue:.2f} (N={count_tissue}), Point={w_point:.2f} (N={count_point})")
+        
+        weights = [w_tissue if is_t else w_point for is_t in is_tissue_list]
+        return torch.DoubleTensor(weights)
 
     def normalize(self, volume):
+        # 全局归一化 [-1, 1]
         min_val = self.opt.norm_min
         max_val = self.opt.norm_max
         volume = np.clip(volume, min_val, max_val)
-        range_val = max_val - min_val
-        return 2.0 * (volume - min_val) / range_val - 1.0
+        return 2.0 * (volume - min_val) / (max_val - min_val) - 1.0
 
     def __getitem__(self, index):
+        # [重要] 保持 Lazy Loading 逻辑
         curr_index = index % self.size
-        
-        # 最大重试次数 (防止极少数全是黑的文件导致死循环)
-        max_retries = 20 
+        max_retries = 20
         retries = 0
 
         while retries < max_retries:
@@ -81,22 +118,15 @@ class UltrasoundDataset(BaseDataset):
             hq_path = self.hq_paths[curr_index]
 
             try:
-                # 1. 打开文件 (Lazy Load，不读入内存)
+                # 1. 只读 Header，不读数据
                 lq_obj = nib.load(lq_path)
                 hq_obj = nib.load(hq_path)
-                
-                # 获取原始形状 (X, Y, Z) = (128, 128, 1024)
-                src_shape = lq_obj.shape 
-                src_x, src_y, src_z = src_shape 
+                src_x, src_y, src_z = lq_obj.shape 
 
-                # 目标 Patch 尺寸 (对应 Z, X, Y)
-                req_z = self.patch_d # 256
-                req_x = self.patch_h # 64
-                req_y = self.patch_w # 64
+                req_z, req_x, req_y = self.patch_d, self.patch_h, self.patch_w
 
                 # --- 训练模式：Active Sampling ---
                 if self.opt.isTrain:
-                    # 检查尺寸是否足够
                     if src_z < req_z or src_x < req_x or src_y < req_y:
                         curr_index = random.randint(0, self.size - 1)
                         retries += 1
@@ -107,38 +137,31 @@ class UltrasoundDataset(BaseDataset):
                     start_y = random.randint(0, src_y - req_y)
                     start_z = random.randint(0, src_z - req_z)
 
-                    # [步骤 A] 先只读 HQ Patch 来做安检
-                    # 使用 dataobj 直接切片 (速度极快)
-                    # 注意顺序: nibabel (X, Y, Z) -> 这里的切片也是 (X, Y, Z)
-                    hq_data_slice = hq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
-                    hq_patch = np.array(hq_data_slice, dtype=np.float32)
-                    
-                    # 归一化 (为了统一数值标准)
+                    # [功能4] 主动采样安检
+                    # 使用 dataobj 切片 (不读全图 -> 内存安全)
+                    hq_slice = hq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
+                    hq_patch = np.array(hq_slice, dtype=np.float32)
                     hq_patch_norm = self.normalize(hq_patch)
-                    
-                    # [步骤 B] 核心检查：是否为空？
-                    # 如果 Patch 中最大值小于阈值，说明全是背景，扔掉重来
+
                     if hq_patch_norm.max() < self.signal_threshold:
-                        # 换个位置或换个文件重试
-                        if random.random() > 0.5:
-                            curr_index = random.randint(0, self.size - 1)
-                        # else: 保持 curr_index 不变，重新随机 crop
+                        # 是空 Patch，重试
+                        if random.random() > 0.5: curr_index = random.randint(0, self.size - 1)
                         retries += 1
                         continue
                     
-                    # [步骤 C] 通关！读取对应的 LQ Patch 并继续处理
-                    lq_data_slice = lq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
-                    lq_patch = np.array(lq_data_slice, dtype=np.float32)
-                    
-                    # 维度转置 (X, Y, Z) -> (Z, X, Y) 以适配 Tensor (D, H, W)
+                    # 读取 LQ
+                    lq_slice = lq_obj.dataobj[start_x:start_x+req_x, start_y:start_y+req_y, start_z:start_z+req_z]
+                    lq_patch = np.array(lq_slice, dtype=np.float32)
+
+                    # 转置: (X, Y, Z) -> (Z, X, Y)
                     lq_patch = lq_patch.transpose(2, 0, 1)
-                    hq_patch = hq_patch.transpose(2, 0, 1) # 使用原始未归一化的 hq_patch 进行转置
+                    hq_patch = hq_patch.transpose(2, 0, 1) # 这里用未归一化的 hq_patch
 
-                    # 重新归一化 (保持流程一致)
+                    # 归一化
                     lq_patch = self.normalize(lq_patch)
-                    hq_patch = self.normalize(hq_patch)
+                    hq_patch = self.normalize(hq_patch) # 再次归一化
 
-                    # 数据增强 (各向异性)
+                    # 数据增强 (可选)
                     if not self.opt.no_elastic:
                         seed = np.random.randint(0, 2**32 - 1)
                         deformer_lq = ElasticDeformation(np.random.RandomState(seed), sigma=self.anisotropic_sigma)
@@ -150,33 +173,27 @@ class UltrasoundDataset(BaseDataset):
                         if random.random() > 0.5:
                             lq_patch = np.flip(lq_patch, axis=2).copy()
                             hq_patch = np.flip(hq_patch, axis=2).copy()
-                    
-                    # 截断与 Tensor 封装
-                    lq_patch = np.clip(lq_patch, -1.0, 1.0)
-                    hq_patch = np.clip(hq_patch, -1.0, 1.0)
 
-                    lq_tensor = torch.from_numpy(lq_patch).float().unsqueeze(0)
-                    hq_tensor = torch.from_numpy(hq_patch).float().unsqueeze(0)
-                    
-                    return {'LQ': lq_tensor, 'HQ': hq_tensor, 'lq_path': lq_path, 'hq_path': hq_path}
-
-                # --- 测试模式：全图读取 ---
+                # --- 测试模式 ---
                 else:
                     lq_vol = np.array(lq_obj.dataobj).astype(np.float32).transpose(2, 0, 1)
                     hq_vol = np.array(hq_obj.dataobj).astype(np.float32).transpose(2, 0, 1)
-                    lq_vol = self.normalize(lq_vol)
-                    hq_vol = self.normalize(hq_vol)
-                    lq_tensor = torch.from_numpy(lq_vol).float().unsqueeze(0)
-                    hq_tensor = torch.from_numpy(hq_vol).float().unsqueeze(0)
-                    return {'LQ': lq_tensor, 'HQ': hq_tensor, 'lq_path': lq_path, 'hq_path': hq_path}
+                    lq_patch = self.normalize(lq_vol)
+                    hq_patch = self.normalize(hq_vol)
+
+                # 转 Tensor
+                lq_patch = np.clip(lq_patch, -1.0, 1.0)
+                hq_patch = np.clip(hq_patch, -1.0, 1.0)
+                lq_tensor = torch.from_numpy(lq_patch).float().unsqueeze(0)
+                hq_tensor = torch.from_numpy(hq_patch).float().unsqueeze(0)
+
+                return {'LQ': lq_tensor, 'HQ': hq_tensor, 'lq_path': lq_path, 'hq_path': hq_path}
 
             except Exception as e:
-                logging.warning(f"Error loading {lq_path}: {e}. Retrying...")
+                logging.warning(f"Error loading {lq_path}: {e}")
                 curr_index = random.randint(0, self.size - 1)
                 retries += 1
         
-        # 如果极其倒霉，连续 20 次都切到空图，就随便返回最后一次的结果（避免程序崩溃）
-        # 这种情况在合理的数据集上极少发生
         return self.__getitem__(random.randint(0, self.size - 1))
 
     def __len__(self):
