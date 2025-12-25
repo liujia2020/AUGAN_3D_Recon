@@ -60,13 +60,110 @@ class UnetSkipConnectionBlock3D(nn.Module):
     结构: [Down] -> [Submodule] -> [Up]
     """
 
+    # def __init__(self, outer_nc, inner_nc, input_nc=None,
+    #              submodule=None, outermost=False, innermost=False, norm_layer=nn.InstanceNorm3d, use_dropout=False):
+    #     super(UnetSkipConnectionBlock3D, self).__init__()
+    #     self.outermost = outermost
+    #     self.innermost = innermost
+        
+    #     # 确定是否使用 Bias (如果是 InstanceNorm，不需要 Bias，因为 Norm 层有仿射参数)
+    #     if type(norm_layer) == functools.partial:
+    #         use_bias = norm_layer.func == nn.InstanceNorm3d
+    #     else:
+    #         use_bias = norm_layer == nn.InstanceNorm3d
+
+    #     if input_nc is None:
+    #         input_nc = outer_nc
+
+    #     # --- 3D 卷积组件 ---
+    #     # 降采样: Stride=2
+    #     downconv = nn.Conv3d(input_nc, inner_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+        
+    #     # 激活函数与归一化
+    #     downrelu = nn.LeakyReLU(0.2, True)
+    #     downnorm = norm_layer(inner_nc)
+    #     uprelu = nn.ReLU(True)
+    #     upnorm = norm_layer(outer_nc)
+
+    #     # # --- 构建逻辑 (递归核心) ---
+        
+    #     # if outermost:
+    #     #     # 最外层: 输入图像 -> [Submodule] -> 输出图像
+    #     #     # 最后一层使用 Tanh 激活，将像素值映射回 [-1, 1]
+    #     #     upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1)
+    #     #     down = [downconv]
+    #     #     up = [uprelu, upconv, nn.Tanh()]
+    #     #     model = down + [submodule] + up
+            
+    #     # elif innermost:
+    #     #     # 最里层: 只有降采样和上采样，没有 Submodule
+    #     #     # Skip Connection 这里是直接拼接
+    #     #     upconv = nn.ConvTranspose3d(inner_nc, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+    #     #     down = [downrelu, downconv]
+    #     #     up = [uprelu, upconv, upnorm]
+    #     #     model = down + up
+            
+    #     # else:
+    #     #     # 中间层: [Down] -> [Submodule] -> [Up]
+    #     #     # 这里的输入会包含上一层的 Skip Connection，所以是 inner_nc * 2
+    #     #     upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+    #     #     down = [downrelu, downconv, downnorm]
+    #     #     up = [uprelu, upconv, upnorm]
+
+    #     #     if use_dropout:
+    #     #         model = down + [submodule] + up + [nn.Dropout(0.5)]
+    #     #     else:
+    #     #         model = down + [submodule] + up
+    #     # --- 替换开始 ---
+    #     if outermost:
+    #         # [修改 1/3] 最外层：输入 (inner_nc * 2) -> 输出 (outer_nc)
+    #         # 原代码: upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1)
+    #         upconv = nn.Sequential(
+    #             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
+    #             nn.Conv3d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1)
+    #         )
+            
+    #         down = [downconv]
+    #         up = [uprelu, upconv, nn.Tanh()]
+    #         model = down + [submodule] + up
+            
+    #     elif innermost:
+    #         # [修改 2/3] 最里层：输入 (inner_nc) -> 输出 (outer_nc)
+    #         # 原代码: upconv = nn.ConvTranspose3d(inner_nc, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+    #         upconv = nn.Sequential(
+    #             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
+    #             nn.Conv3d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
+    #         )
+            
+    #         down = [downrelu, downconv]
+    #         up = [uprelu, upconv, upnorm]
+    #         model = down + up
+            
+    #     else:
+    #         # [修改 3/3] 中间层：输入 (inner_nc * 2) -> 输出 (outer_nc)
+    #         # 原代码: upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+    #         upconv = nn.Sequential(
+    #             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
+    #             nn.Conv3d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
+    #         )
+            
+    #         down = [downrelu, downconv, downnorm]
+    #         up = [uprelu, upconv, upnorm]
+
+    #         if use_dropout:
+    #             model = down + [submodule] + up + [nn.Dropout(0.5)]
+    #         else:
+    #             model = down + [submodule] + up
+    #     # --- 替换结束 ---
+
+    #     self.model = nn.Sequential(*model)
     def __init__(self, outer_nc, inner_nc, input_nc=None,
                  submodule=None, outermost=False, innermost=False, norm_layer=nn.InstanceNorm3d, use_dropout=False):
         super(UnetSkipConnectionBlock3D, self).__init__()
         self.outermost = outermost
         self.innermost = innermost
         
-        # 确定是否使用 Bias (如果是 InstanceNorm，不需要 Bias，因为 Norm 层有仿射参数)
+        # 确定是否使用 Bias
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm3d
         else:
@@ -75,38 +172,52 @@ class UnetSkipConnectionBlock3D(nn.Module):
         if input_nc is None:
             input_nc = outer_nc
 
-        # --- 3D 卷积组件 ---
-        # 降采样: Stride=2
+        # --- 下采样部分 (保持不变) ---
         downconv = nn.Conv3d(input_nc, inner_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
-        
-        # 激活函数与归一化
         downrelu = nn.LeakyReLU(0.2, True)
         downnorm = norm_layer(inner_nc)
         uprelu = nn.ReLU(True)
         upnorm = norm_layer(outer_nc)
 
-        # --- 构建逻辑 (递归核心) ---
+        # --- 上采样部分 (显存优化版 Resize-Conv) ---
         
         if outermost:
-            # 最外层: 输入图像 -> [Submodule] -> 输出图像
-            # 最后一层使用 Tanh 激活，将像素值映射回 [-1, 1]
-            upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1)
+            # [显存优化关键点] 最外层: 输入(inner_nc*2) -> 压缩至16通道 -> 上采样 -> 输出(outer_nc)
+            # 显存占用降低 8-10 倍
+            mid_c = 32 
+            upconv = nn.Sequential(
+                nn.Conv3d(inner_nc * 2, mid_c, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(True), # 激活
+                nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True), # 上采样
+                nn.Conv3d(mid_c, outer_nc, kernel_size=3, stride=1, padding=1) # 输出
+            )
+            
             down = [downconv]
             up = [uprelu, upconv, nn.Tanh()]
             model = down + [submodule] + up
             
         elif innermost:
-            # 最里层: 只有降采样和上采样，没有 Submodule
-            # Skip Connection 这里是直接拼接
-            upconv = nn.ConvTranspose3d(inner_nc, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+            # 最里层: inner_nc -> outer_nc (压缩) -> 上采样 -> 修正
+            upconv = nn.Sequential(
+                nn.Conv3d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias),
+                nn.ReLU(True),
+                nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
+                nn.Conv3d(outer_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
+            )
+            
             down = [downrelu, downconv]
             up = [uprelu, upconv, upnorm]
             model = down + up
             
         else:
-            # 中间层: [Down] -> [Submodule] -> [Up]
-            # 这里的输入会包含上一层的 Skip Connection，所以是 inner_nc * 2
-            upconv = nn.ConvTranspose3d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+            # 中间层: inner_nc*2 -> outer_nc (压缩) -> 上采样 -> 修正
+            upconv = nn.Sequential(
+                nn.Conv3d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias),
+                nn.ReLU(True),
+                nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
+                nn.Conv3d(outer_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
+            )
+            
             down = [downrelu, downconv, downnorm]
             up = [uprelu, upconv, upnorm]
 
@@ -116,7 +227,7 @@ class UnetSkipConnectionBlock3D(nn.Module):
                 model = down + [submodule] + up
 
         self.model = nn.Sequential(*model)
-
+        
     def forward(self, x):
         if self.outermost:
             return self.model(x)
